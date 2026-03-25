@@ -2,6 +2,8 @@
 
 `CorePass.Auth` is a .NET library for integrating CorePass authentication into ASP.NET Core and Blazor applications.
 
+[NuGet Paket](https://www.nuget.org/packages/CorePass.Auth)
+
 At this point, the package provides a complete implementation of the CorePass authentication flow and will be further improved and expanded over time with KYC features and more.
 
 ---
