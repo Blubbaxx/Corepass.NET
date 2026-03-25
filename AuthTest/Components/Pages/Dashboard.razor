@@ -1,0 +1,43 @@
+@page "/dashboard"
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.AspNetCore.Components.Authorization
+@attribute [Authorize]
+@inject NavigationManager Navigation
+
+<PageTitle>Dashboard — CorePass</PageTitle>
+
+<div class="container mt-4">
+    <h2>Dashboard</h2>
+
+    <AuthorizeView>
+        <Authorized>
+            <div class="card mt-3">
+                <div class="card-body">
+                    <h5 class="card-title">Welcome, @context.User.Identity?.Name</h5>
+                    <dl class="row mt-3">
+                        <dt class="col-sm-3">Core ID</dt>
+                        <dd class="col-sm-9">@context.User.FindFirst("coreId")?.Value</dd>
+
+                        <dt class="col-sm-3">ICAN</dt>
+                        <dd class="col-sm-9">@context.User.FindFirst("ican")?.Value</dd>
+                    </dl>
+                    <button class="btn btn-outline-danger mt-2" @onclick="Logout">Sign Out</button>
+                </div>
+            </div>
+        </Authorized>
+        <NotAuthorized>
+            <div class="alert alert-warning mt-3">
+                <p>You are not authenticated. Redirecting to login…</p>
+            </div>
+        </NotAuthorized>
+    </AuthorizeView>
+</div>
+
+@code {
+    private async Task Logout()
+    {
+        using var http = new HttpClient { BaseAddress = new Uri(Navigation.BaseUri) };
+        await http.PostAsync("auth/logout", null);
+        Navigation.NavigateTo("/login", forceLoad: true);
+    }
+}

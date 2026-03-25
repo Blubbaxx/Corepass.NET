@@ -1,0 +1,233 @@
+@page "/login"
+@using Microsoft.AspNetCore.Components.Authorization
+@inject NavigationManager Navigation
+@inject AuthenticationStateProvider AuthStateProvider
+@implements IDisposable
+
+<PageTitle>Login — CorePass</PageTitle>
+
+<div class="container mt-5">
+    <div class="row justify-content-center">
+        <div class="col-md-6 text-center">
+            <h2 class="mb-4">Sign in with CorePass</h2>
+
+            @if (_error is not null)
+            {
+                <div class="alert alert-danger">@_error</div>
+            }
+
+            @switch (_state)
+            {
+                case LoginState.Loading:
+                    <p>Initializing login…</p>
+                    break;
+
+                case LoginState.ShowQr:
+                    <div class="card mx-auto" style="max-width: 320px;">
+                        <div class="card-body">
+                            @if (_qrDataUrl is not null)
+                            {
+                                <img src="@_qrDataUrl" alt="CorePass QR Code"
+                                     class="img-fluid mb-3" style="image-rendering: pixelated;" />
+                            }
+                            else
+                            {
+                                <p class="text-muted">QR code unavailable</p>
+                            }
+
+                            <p class="small text-muted mb-2">
+                                Scan with the CorePass app or tap the link on mobile:
+                            </p>
+
+                            <a href="@_mobileUri" class="btn btn-primary w-100 mb-2"
+                               target="_blank" rel="noopener">
+                                Open CorePass App
+                            </a>
+
+                            <p class="small text-muted">
+                                Expires in @(_expiresIn) seconds
+                            </p>
+                        </div>
+                    </div>
+                    break;
+
+                case LoginState.Authenticated:
+                    <div class="alert alert-success">
+                        <p>Authenticated as <strong>@_userName</strong></p>
+                        <p>Redirecting to dashboard…</p>
+                    </div>
+                    break;
+
+                case LoginState.Expired:
+                    <div class="alert alert-warning">
+                        <p>Login challenge expired.</p>
+                        <button class="btn btn-outline-primary" @onclick="StartLogin">Try Again</button>
+                    </div>
+                    break;
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+    private enum LoginState { Loading, ShowQr, Authenticated, Expired }
+
+    private LoginState _state = LoginState.Loading;
+    private string? _challengeId;
+    private string? _qrDataUrl;
+    private string? _mobileUri;
+    private string? _error;
+    private string? _userName;
+    private int _expiresIn;
+    private CancellationTokenSource _cts = new();
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await StartLogin();
+        }
+    }
+
+    private async Task StartLogin()
+    {
+        _state = LoginState.Loading;
+        _error = null;
+        StateHasChanged();
+
+        try
+        {
+            using var http = new HttpClient { BaseAddress = new Uri(Navigation.BaseUri) };
+            var challengeResp = await http.PostAsync("auth/challenge", null);
+
+            if (!challengeResp.IsSuccessStatusCode)
+            {
+                _error = "Failed to create login challenge.";
+                _state = LoginState.Expired;
+                StateHasChanged();
+                return;
+            }
+
+            var challenge = await challengeResp.Content.ReadFromJsonAsync<ChallengeDto>();
+            if (challenge is null)
+            {
+                _error = "Invalid challenge response.";
+                _state = LoginState.Expired;
+                StateHasChanged();
+                return;
+            }
+
+            _challengeId = challenge.ChallengeId;
+            _qrDataUrl = challenge.QrDataUrl;
+            _mobileUri = challenge.MobileUri;
+            _expiresIn = challenge.ExpiresIn;
+            _state = LoginState.ShowQr;
+            StateHasChanged();
+
+            // Start polling
+            await PollChallengeStatus(http);
+        }
+        catch (Exception ex)
+        {
+            _error = $"Login error: {ex.Message}";
+            _state = LoginState.Expired;
+            StateHasChanged();
+        }
+    }
+
+    private async Task PollChallengeStatus(HttpClient http)
+    {
+        var token = _cts.Token;
+        var maxAttempts = _expiresIn / 2; // poll every 2 seconds
+
+        for (int i = 0; i < maxAttempts && !token.IsCancellationRequested; i++)
+        {
+            await Task.Delay(2000, token);
+
+            try
+            {
+                var resp = await http.GetAsync($"auth/challenge/{_challengeId}", token);
+
+                if (resp.StatusCode == System.Net.HttpStatusCode.NotFound ||
+                    resp.StatusCode == System.Net.HttpStatusCode.Gone)
+                {
+                    _state = LoginState.Expired;
+                    StateHasChanged();
+                    return;
+                }
+
+                var status = await resp.Content.ReadFromJsonAsync<ChallengeStatusDto>(token);
+                if (status is null) continue;
+
+                switch (status.Status)
+                {
+                    case "authenticated":
+                        _state = LoginState.Authenticated;
+                        _userName = status.Name;
+                        StateHasChanged();
+
+                        // Navigate to the cookie-setting endpoint which will redirect to dashboard
+                        if (status.Token is not null)
+                        {
+                            await Task.Delay(500, token);
+                            Navigation.NavigateTo(
+                                $"/auth/set-cookie?token={Uri.EscapeDataString(status.Token)}&returnUrl=/dashboard",
+                                forceLoad: true);
+                        }
+                        return;
+
+                    case "rejected":
+                        _error = status.Reason ?? "Login was rejected.";
+                        _state = LoginState.Expired;
+                        StateHasChanged();
+                        return;
+
+                    case "expired":
+                        _state = LoginState.Expired;
+                        StateHasChanged();
+                        return;
+
+                    // "pending" - continue polling
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch
+            {
+                // Transient error, continue polling
+            }
+        }
+
+        // Timed out
+        _state = LoginState.Expired;
+        StateHasChanged();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        _cts.Dispose();
+    }
+
+    // Local DTOs for deserialization
+    private sealed class ChallengeDto
+    {
+        public string ChallengeId { get; set; } = "";
+        public string LoginUri { get; set; } = "";
+        public string MobileUri { get; set; } = "";
+        public string AppLinkUri { get; set; } = "";
+        public int ExpiresIn { get; set; }
+        public string? QrDataUrl { get; set; }
+    }
+
+    private sealed class ChallengeStatusDto
+    {
+        public string Status { get; set; } = "";
+        public string? Token { get; set; }
+        public string? Ican { get; set; }
+        public string? Name { get; set; }
+        public string? Reason { get; set; }
+    }
+}
